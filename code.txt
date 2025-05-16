@@ -1,0 +1,186 @@
+Non voici les codes qu'on avait fait, tu peux modifier si c'est pas encore bon
+
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'feed_event.dart';
+import 'feed_state.dart';
+import '../../repositories/unsplash_repository.dart';
+import '../../models/photo_model.dart';
+
+class FeedBloc extends Bloc<FeedEvent, FeedState> {
+  final UnsplashRepository repository;
+  int page = 1;
+  final int perPage = 10;
+  bool isFetching = false;
+
+  FeedBloc(this.repository) : super(FeedInitial()) {
+    on<FetchPhotos>(_onFetchPhotos);
+  }
+
+  Future<void> _onFetchPhotos(
+      FetchPhotos event, Emitter<FeedState> emit) async {
+    try {
+      if (state is FeedLoading) return;
+
+      final currentState = state;
+      List<PhotoModel> currentPhotos = [];
+
+      if (currentState is FeedLoaded) {
+        currentPhotos = currentState.photos;
+      }
+
+      emit(FeedLoading());
+
+      final List<PhotoModel> photos =
+          await repository.fetchPhotos(page, perPage);
+      final List<PhotoModel> newPhotos = [...currentPhotos, ...photos];
+
+      final hasReachedMax = photos.length < perPage;
+
+      emit(FeedLoaded(newPhotos, hasReachedMax: hasReachedMax));
+
+      if (!hasReachedMax) {
+        page++;
+      }
+    } catch (e) {
+      emit(FeedError(e.toString()));
+    }
+  }
+}
+
+abstract class FeedEvent {}
+
+class FetchPhotos extends FeedEvent {}
+
+
+import '../../models/photo_model.dart';
+
+abstract class FeedState {}
+
+class FeedInitial extends FeedState {}
+
+class FeedLoading extends FeedState {}
+
+class FeedLoaded extends FeedState {
+  final List<PhotoModel> photos;
+  final bool hasReachedMax;
+
+  FeedLoaded(this.photos, {this.hasReachedMax = false});
+}
+
+class FeedError extends FeedState {
+  final String message;
+  FeedError(this.message);
+}
+
+
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import '../../blocs/feed/feed_bloc.dart';
+import '../../blocs/feed/feed_event.dart';
+import '../../blocs/feed/feed_state.dart';
+import '../../repositories/unsplash_repository.dart';
+import '../../widgets/photo_tile.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+class FeedScreen extends StatefulWidget {
+  const FeedScreen({Key? key}) : super(key: key);
+
+  @override
+  _FeedScreenState createState() => _FeedScreenState();
+}
+
+class _FeedScreenState extends State<FeedScreen> {
+  late FeedBloc _feedBloc;
+  late ScrollController _scrollController;
+  Set<String> likedPhotoIds = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _feedBloc = FeedBloc(UnsplashRepository())..add(FetchPhotos());
+    _scrollController = ScrollController();
+    _scrollController.addListener(_onScroll);
+    _loadLikes();
+  }
+
+  void _onScroll() {
+    if (_scrollController.position.pixels >=
+            _scrollController.position.maxScrollExtent - 300 &&
+        !_feedBloc.isFetching) {
+      _feedBloc.add(FetchPhotos());
+    }
+  }
+
+  Future<void> _loadLikes() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      likedPhotoIds = prefs.getStringList('likedPhotos')?.toSet() ?? {};
+    });
+  }
+
+  Future<void> _toggleLike(String photoId) async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      if (likedPhotoIds.contains(photoId)) {
+        likedPhotoIds.remove(photoId);
+      } else {
+        likedPhotoIds.add(photoId);
+      }
+    });
+    await prefs.setStringList('likedPhotos', likedPhotoIds.toList());
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    _feedBloc.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocProvider.value(
+      value: _feedBloc,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Image.asset('assets/images/instagram_logo.png', height: 40),
+          backgroundColor: Colors.white,
+          elevation: 1,
+        ),
+        body: BlocBuilder<FeedBloc, FeedState>(
+          builder: (context, state) {
+            if (state is FeedLoading && (state is! FeedLoaded)) {
+              return const Center(child: CircularProgressIndicator());
+            } else if (state is FeedLoaded) {
+              return ListView.builder(
+                controller: _scrollController,
+                itemCount: state.photos.length + 1,
+                itemBuilder: (context, index) {
+                  if (index < state.photos.length) {
+                    final photo = state.photos[index];
+                    final isLiked = likedPhotoIds.contains(photo.id);
+                    return PhotoTile(
+                      photo: photo,
+                      isLiked: isLiked,
+                      onLikeToggle: () => _toggleLike(photo.id),
+                    );
+                  } else {
+                    return state.hasReachedMax
+                        ? const SizedBox.shrink()
+                        : const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 16),
+                            child: Center(child: CircularProgressIndicator()),
+                          );
+                  }
+                },
+              );
+            } else if (state is FeedError) {
+              return Center(child: Text(state.message));
+            }
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+  }
+}
